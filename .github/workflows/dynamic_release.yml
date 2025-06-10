@@ -13,7 +13,6 @@ on:
           - global_release
 
 env:
-  PROJECT_PATH: project_18
   APPS_PATH: apps
   LIBRARIES_PATH: libraries
   DEPENDENCIES_PATH: dependencies
@@ -64,7 +63,7 @@ jobs:
       - name: Check which service has changed since last release
         id: check_changed_services
         run: |
-          ALL_SERVICES=$(ls -d $PROJECT_PATH/$APPS_PATH/*/ | xargs -n 1 basename)
+          ALL_SERVICES=$(ls -d $APPS_PATH/*/ | xargs -n 1 basename)
           echo "All services found: $ALL_SERVICES"
 
           # Get the commit hash of the last release from previous step
@@ -87,10 +86,10 @@ jobs:
           while IFS= read -r file; do
             echo "Processing changed file: $file"
 
-            if [[ "$file" == "package.json" || "$file" == "$PROJECT_PATH/dependencies/"* || "$file" == "$PROJECT_PATH/libraries/"* ]]; then
+            if [[ "$file" == "package.json" || "$file" == "dependencies/"* || "$file" == "libraries/"* ]]; then
               GLOBAL_CHANGED=true
               break
-            elif [[ "$file" == $PROJECT_PATH/$APPS_PATH/* ]]; then
+            elif [[ "$file" == $APPS_PATH/* ]]; then
               service=$(echo "$file" | cut -d '/' -f 3)
               if [[ ! " $SERVICES " =~ " $service " ]]; then
                 SERVICES="$SERVICES $service"
@@ -122,7 +121,7 @@ jobs:
 
           # Create a zip for all services (global release)
           echo "Creating zip for all services (global release)"
-          zip -r $OUTPUT_DIR/global_release_${{ env.VERSION }}.zip $PROJECT_PATH/*
+          zip -r $OUTPUT_DIR/global_release_${{ env.VERSION }}.zip *
           mv $OUTPUT_DIR/global_release_${{ env.VERSION }}.zip .
           
           # Create a zip for the changed service
@@ -132,11 +131,11 @@ jobs:
             
             for SERVICE in `echo $service | tr ' ' '\n'`
             do
-              cp -afv $PROJECT_PATH/$APPS_PATH/$SERVICE $OUTPUT_DIR/
+              cp -afv $APPS_PATH/$SERVICE $OUTPUT_DIR/
             done
           fi
 
-          cp -afv $PROJECT_PATH/$LIBRARIES_PATH $PROJECT_PATH/$DEPENDENCIES_PATH $PROJECT_PATH/package.json $OUTPUT_DIR/
+          cp -afv $LIBRARIES_PATH $DEPENDENCIES_PATH package.json $OUTPUT_DIR/
           zip -r $OUTPUT_DIR/apps_release_${{ env.VERSION }}.zip $OUTPUT_DIR/*
         
           echo "Print Both Zips"

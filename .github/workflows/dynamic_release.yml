@@ -75,11 +75,6 @@ jobs:
           echo "Changed files: $changed_files"
           echo "$changed_files" > changed_files.txt
 
-          # Extract the service that has changed
-          # changed_service=$(echo "$changed_files" | cut -d '/' -f 3)
-          # echo "Changed service: $changed_service"
-          # echo "::set-output name=changed_service::$changed_service"
-
           GLOBAL_CHANGED=false
           SERVICES=""
 
@@ -90,7 +85,7 @@ jobs:
               GLOBAL_CHANGED=true
               break
             elif [[ "$file" == $APPS_PATH/* ]]; then
-              service=$(echo "$file" | cut -d '/' -f 3)
+              service=$(echo "$file" | cut -d '/' -f 2)
               if [[ ! " $SERVICES " =~ " $service " ]]; then
                 SERVICES="$SERVICES $service"
               fi

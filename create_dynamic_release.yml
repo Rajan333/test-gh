@@ -1,0 +1,137 @@
+name: Build Changed Services and Create Release
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PROJECT_PATH: project_18
+  APPS_PATH: apps
+  OUTPUT_DIR: release_zips
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history for accurate diff
+
+      - name: Show last commit info
+        run: |
+          echo "Last commit:"
+          git log -1 --stat
+
+      - name: Get changed files in last commit
+        id: changed
+        run: |
+          echo "Fetching changed files in last commit..."
+
+          CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r -m HEAD)
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No files found with diff-tree, trying git show..."
+            CHANGED_FILES=$(git show --pretty="" --name-only HEAD)
+          fi
+
+          echo "$CHANGED_FILES"
+          echo "$CHANGED_FILES" > changed_files.txt
+
+          {
+            echo "changed_files<<EOF"
+            echo "$CHANGED_FILES"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Determine services to build
+        id: services-to-build
+        run: |
+          ALL_SERVICES=$(ls -d $PROJECT_PATH/$APPS_PATH/*/ | xargs -n 1 basename)
+          echo "All services found: $ALL_SERVICES"
+
+          GLOBAL_CHANGED=false
+          SERVICES=""
+
+          while IFS= read -r file; do
+            echo "Processing changed file: $file"
+
+            if [[ "$file" == "package.json" || "$file" == "$PROJECT_PATH/dependencies/"* || "$file" == "$PROJECT_PATH/libraries/"* ]]; then
+              GLOBAL_CHANGED=true
+              break
+            elif [[ "$file" == $PROJECT_PATH/$APPS_PATH/* ]]; then
+              service=$(echo "$file" | cut -d '/' -f 3)
+              if [[ ! " $SERVICES " =~ " $service " ]]; then
+                SERVICES="$SERVICES $service"
+              fi
+            fi
+          done < changed_files.txt
+
+          if [[ "$GLOBAL_CHANGED" == true ]]; then
+            echo "Global files changed, building all services."
+            SERVICES="$ALL_SERVICES"
+          fi
+
+          SERVICES=$(echo $SERVICES | xargs) # trim spaces
+
+          if [ -z "$SERVICES" ]; then
+            echo "No service changes detected."
+          else
+            echo "Services to build: $SERVICES"
+          fi
+
+          echo "services=$SERVICES" >> $GITHUB_OUTPUT
+
+      - name: Create output directory for zips
+        run: mkdir -p $OUTPUT_DIR
+
+      - name: Build and zip changed services + common dependencies
+        if: steps.services-to-build.outputs.services != ''
+        run: |
+          echo "Building and zipping services: ${{ steps.services-to-build.outputs.services }}"
+
+          for service in ${{ steps.services-to-build.outputs.services }}; do
+            echo "Building $service..."
+
+            ZIP_NAME="$OUTPUT_DIR/${service}_with_common.zip"
+
+            rm -rf build_tmp/$service
+            mkdir -p build_tmp/$service
+
+            cp -r $PROJECT_PATH/$APPS_PATH/"$service" build_tmp/$service/
+            cp -r $PROJECT_PATH/dependencies build_tmp/$service/ || true
+            cp -r $PROJECT_PATH/libraries build_tmp/$service/ || true
+            cp $PROJECT_PATH/package.json build_tmp/$service/ || true
+
+            (cd build_tmp/$service && zip -r ../../$ZIP_NAME ./*)
+
+            echo "Created $ZIP_NAME"
+          done
+
+      - name: Build and zip ALL services + common dependencies
+        run: |
+          echo "Building full zip with all services + common dependencies..."
+
+          ZIP_NAME="$OUTPUT_DIR/all_services_with_common.zip"
+          rm -rf build_tmp/all_services
+          mkdir -p build_tmp/all_services
+
+          for svc_dir in $PROJECT_PATH/$APPS_PATH/*/; do
+            cp -r "$svc_dir" build_tmp/all_services/
+          done
+
+          cp -r $PROJECT_PATH/dependencies build_tmp/all_services/ || true
+          cp -r $PROJECT_PATH/libraries build_tmp/all_services/ || true
+          cp $PROJECT_PATH/package.json build_tmp/all_services/ || true
+
+          (cd build_tmp/all_services && zip -r ../../$ZIP_NAME ./*)
+
+          echo "Created $ZIP_NAME"
+
+      - name: Create GitHub Release and upload zip files
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ env.OUTPUT_DIR }}/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

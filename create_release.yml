@@ -1,0 +1,150 @@
+name: Create Service Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to release from'
+        required: true
+        default: 'master'
+      service:
+        description: 'Service to release'
+        required: true
+        type: choice
+        options:
+          - attribution-service
+          - deployment-service
+          - dummy-service
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '16'
+
+      - name: Read and Update Version
+        id: bump_version
+        run: |
+          SERVICE="${{ github.event.inputs.service }}"
+          MANIFEST_FILE="manifest.json"
+          VERSION=$(jq -r ".services[\"${SERVICE}\"].version" $MANIFEST_FILE)
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          jq ".services[\"${SERVICE}\"].version = \"$NEW_VERSION\"" $MANIFEST_FILE > temp.json && mv temp.json $MANIFEST_FILE
+          echo "New version: $NEW_VERSION"
+          echo "::set-output name=version::$NEW_VERSION"
+
+      - name: Commit Updated Manifest and Create PR
+        id: create_pr
+        run: |
+          git config user.name "Github Actions"
+          git config user.email "actions@github.com"
+          
+          # Create a new branch for the release
+          RELEASE_BRANCH="feature/release-${{ github.event.inputs.service }}-${{ steps.bump_version.outputs.version }}"
+          git checkout -b $RELEASE_BRANCH
+          
+          # Commit the changes
+          git add manifest.json
+          git commit -m "Bump version for ${{ github.event.inputs.service }} to ${{ steps.bump_version.outputs.version }}"
+          
+          # Push the new branch to origin
+          git push origin $RELEASE_BRANCH
+          
+          # Create a pull request
+          PR_URL=$(gh pr create --title "Release ${{ steps.bump_version.outputs.version }}" \
+            --body "Bump version for ${{ github.event.inputs.service }}" \
+            --base ${{ github.event.inputs.branch }} \
+            --head $RELEASE_BRANCH)
+            
+          echo "::set-output name=pr_url::$PR_URL"
+
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+      - name: Wait for PR Approval and Merge
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const prUrl = "${{ steps.create_pr.outputs.pr_url }}";
+            const prNumber = prUrl.split('/').pop();
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            while (pr.state !== 'closed') {
+              console.log('Waiting for PR to be merged...');
+              await new Promise(r => setTimeout(r, 60000)); // Wait 1 minute
+              const { data: updatedPr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+              pr.state = updatedPr.state;
+            }
+            console.log('PR merged.');
+
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retain Only Selected Service Directory
+        run: |
+          SERVICE="${{ github.event.inputs.service }}"
+          mv apps/$SERVICE .
+          # Remove all files and directories except the selected service and .git folder
+          find . -mindepth 1 -maxdepth 1 \
+            ! -name "$SERVICE" \
+            ! -name ".git" \
+            ! -name "package.json" \
+            -exec rm -rf {} +
+          echo "Retained only the $SERVICE directory."
+
+      - name: Prepare Release Package
+        run: |
+          SERVICE="${{ github.event.inputs.service }}"
+          RELEASE_ZIP="release-${SERVICE}-${{ steps.bump_version.outputs.version }}.zip"
+
+          # Create a ZIP file for the selected service directory
+          zip -r $RELEASE_ZIP $SERVICE package.json
+          echo "Created release package: $RELEASE_ZIP"
+      
+      - name: Tag and Create GitHub Release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: release-${{ github.event.inputs.service }}-${{ steps.bump_version.outputs.version }}.zip
+          asset_name: release-${{ github.event.inputs.service }}-${{ steps.bump_version.outputs.version }}.zip
+          release_name: release-${{ github.event.inputs.service }}-${{ steps.bump_version.outputs.version }}
+          tag: ${{ github.event.inputs.service }}-${{ steps.bump_version.outputs.version }}
+          overwrite: true
+          body: "Release notes for ${{ github.event.inputs.service }}"
+
+      # - name: Tag and Create GitHub Release
+      #   id: create_release
+      #   uses: actions/create-release@v1
+      #   with:
+      #     tag_name: ${{ steps.bump_version.outputs.version }}
+      #     release_name: "Release ${{ steps.bump_version.outputs.version }} for ${{ github.event.inputs.service }}"
+      #     body: |
+      #       Release notes for ${{ github.event.inputs.service }}
+      #     draft: false
+      #     prerelease: false
+      #     files: |
+      #       release-${{ github.event.inputs.service }}-${{ steps.bump_version.outputs.version }}.zip
+      #   env:
+      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+      - name: Publish to Artifactory
+        run: |
+          echo "Publishing ${{ github.event.inputs.service }} version ${{ steps.bump_version.outputs.version }} to Artifactory"
+          # Add your Artifactory CLI commands here

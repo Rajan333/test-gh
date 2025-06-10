@@ -1,0 +1,169 @@
+name: Create and Push Releases
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PROJECT_PATH: project_18
+  APPS_PATH: apps
+  LIBRARIES_PATH: libraries
+  DEPENDENCIES_PATH: dependencies
+  OUTPUT_DIR: release_zips
+  VERSION: 1.0.2  # Adjust the version number as needed
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history for accurate diff
+
+      - name: Get last created release starting with apps_
+        id: get_last_release
+        run: |
+          # Fetch releases and filter for those starting with "apps_"
+          releases=$(gh release list --json name,createdAt --jq '[.[] | select(.name | startswith("apps_"))]')
+          # Get the most recent release tag
+          latest_release=$(echo "$releases" | jq -r 'sort_by(.createdAt) | .[-1].name')
+          echo "Last created release: $latest_release"
+          echo "::set-output name=last_release_name::$latest_release"
+
+      - name: Get commit hash for the last release
+        id: get_commit_hash
+        run: |
+          # Get the commit hash associated with the release using GitHub CLI
+          release_name="${{ steps.get_last_release.outputs.last_release_name }}"
+          if [ "$release_name" != "null" ]; then
+            # Fetch the commit hash for the release tag
+            # release_commit=$(gh release view "$release_name" --json targetCommitish -q ".targetCommitish")
+            release_commit=$(git rev-list -n 1 "$release_name")
+            echo "Release commit hash: $release_commit"
+            echo "::set-output name=release_commit::$release_commit"
+          else
+            echo "No previous release found, using initial commit."
+            echo "::set-output name=release_commit::HEAD~1"
+          fi
+      
+      - name: Check which service has changed since last release
+        id: check_changed_services
+        run: |
+          ALL_SERVICES=$(ls -d $PROJECT_PATH/$APPS_PATH/*/ | xargs -n 1 basename)
+          echo "All services found: $ALL_SERVICES"
+
+          # Get the commit hash of the last release from previous step
+          release_commit="${{ steps.get_commit_hash.outputs.release_commit }}"
+          echo "Using commit: $release_commit"
+
+          # Get the changed files since the last release commit
+          changed_files=$(git diff --name-only "$release_commit" HEAD)
+          echo "Changed files: $changed_files"
+          echo "$changed_files" > changed_files.txt
+
+          # Extract the service that has changed
+          # changed_service=$(echo "$changed_files" | cut -d '/' -f 3)
+          # echo "Changed service: $changed_service"
+          # echo "::set-output name=changed_service::$changed_service"
+
+          GLOBAL_CHANGED=false
+          SERVICES=""
+
+          while IFS= read -r file; do
+            echo "Processing changed file: $file"
+
+            if [[ "$file" == "package.json" || "$file" == "$PROJECT_PATH/dependencies/"* || "$file" == "$PROJECT_PATH/libraries/"* ]]; then
+              GLOBAL_CHANGED=true
+              break
+            elif [[ "$file" == $PROJECT_PATH/$APPS_PATH/* ]]; then
+              service=$(echo "$file" | cut -d '/' -f 3)
+              if [[ ! " $SERVICES " =~ " $service " ]]; then
+                SERVICES="$SERVICES $service"
+              fi
+            fi
+          done < changed_files.txt
+
+          if [[ "$GLOBAL_CHANGED" == true ]]; then
+            echo "Global files changed, building all services."
+            SERVICES="$ALL_SERVICES"
+          fi
+
+          SERVICES=$(echo $SERVICES | xargs) # trim spaces
+
+          if [ -z "$SERVICES" ]; then
+            echo "No service changes detected."
+          else
+            echo "Services to build: $SERVICES"
+          fi
+
+          echo "::set-output name=changed_service::$SERVICES"
+          echo "services=$SERVICES" >> $GITHUB_OUTPUT
+
+      - name: Create zip for the changed service and global release
+        run: |
+          # Create a folder for zips
+          mkdir -p $OUTPUT_DIR
+
+          # Create a zip for all services (global release)
+          echo "Creating zip for all services (global release)"
+          zip -r $OUTPUT_DIR/global_release_${{ env.VERSION }}.zip $PROJECT_PATH/*
+          mv $OUTPUT_DIR/global_release_${{ env.VERSION }}.zip .
+          
+          # Create a zip for the changed service
+          if [ -n "${{ steps.check_changed_services.outputs.changed_service }}" ]; then
+            echo "Creating zip for changed service"
+            service="${{ steps.check_changed_services.outputs.changed_service }}"
+            
+            for SERVICE in `echo $service | tr ' ' '\n'`
+            do
+              cp -afv $PROJECT_PATH/$APPS_PATH/$SERVICE $OUTPUT_DIR/
+            done
+          fi
+
+          cp -afv $PROJECT_PATH/$LIBRARIES_PATH $PROJECT_PATH/$DEPENDENCIES_PATH $PROJECT_PATH/package.json $OUTPUT_DIR/
+          zip -r $OUTPUT_DIR/apps_release_${{ env.VERSION }}.zip $OUTPUT_DIR/*
+        
+          echo "Print Both Zips"
+          ls $OUTPUT_DIR/*
+          
+          mv $OUTPUT_DIR/apps_release_${{ env.VERSION }}.zip .
+          
+          
+          find . -mindepth 1 -maxdepth 1 \
+            ! -name 'apps_release_${{ env.VERSION }}.zip' \
+            ! -name 'global_release_${{ env.VERSION }}.zip' \
+            ! -name '.git' \
+            -exec rm -rf {} +  # Remove everything except app_release_zip, global_release_zip
+          
+          echo "Listing all files"
+          ls
+          
+    
+      - name: Tag and Create Global Release
+        uses: svenstaro/upload-release-action@2.9.0
+        with:
+          repo_token: "${{ secrets.TOKEN }}"
+          file: global_release_${{ env.VERSION }}.zip
+          asset_name: "global_release_${{ env.VERSION }}.zip"
+          release_name: "global_release_${{ env.VERSION }}"
+          tag: "global_release_${{ env.VERSION }}"
+          overwrite: true
+          body: "Release notes for global_release_${{ env.VERSION }}"
+      
+      - name: Tag and Create GitHub Release
+        uses: svenstaro/upload-release-action@2.9.0
+        with:
+          repo_token: "${{ secrets.TOKEN }}"
+          file: apps_release_${{ env.VERSION }}.zip
+          asset_name: "apps_release_${{ env.VERSION }}.zip"
+          release_name: "apps_release_${{ env.VERSION }}"
+          tag: "apps_release_${{ env.VERSION }}"
+          overwrite: true
+          body: "Release notes for apps_release_${{ env.VERSION }}"
+
+      - name: Clean up
+        run: |
+          rm -rf $OUTPUT_DIR
